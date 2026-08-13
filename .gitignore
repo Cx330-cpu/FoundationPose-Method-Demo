@@ -18,6 +18,7 @@ dist/
 # *.png
 # *.jpg
 debug/
+debug_*/
 weights/*
 downloads/
 eggs/
