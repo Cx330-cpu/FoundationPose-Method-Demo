@@ -18,19 +18,77 @@ def build_synthetic_rgb(width, height, index):
 
 
 def build_synthetic_depth_mm(width, height):
-  x = np.arange(width, dtype=np.int32)
-  row = (700 + (x * 100 // max(1, width - 1))).astype(np.uint16)
-  return np.tile(row[None, :], (height, 1))
+  y, x = np.indices((height, width), dtype=np.int32)
+  depth = (
+    700
+    + (x * 100 // max(1, width - 1))
+    + (y * 50 // max(1, height - 1))
+  )
+  return depth.astype(np.uint16)
 
 
 def build_synthetic_mask(width, height):
   mask = np.zeros((height, width), dtype=bool)
-  x_min = width // 4
-  x_max = width * 3 // 4
-  y_min = height // 4
-  y_max = height * 3 // 4
+  x_min = width // 8
+  x_max = width // 2
+  y_min = height // 6
+  y_max = height // 2
   mask[y_min:y_max, x_min:x_max] = True
+
+  notch_x_min = width // 8
+  notch_x_max = width // 4
+  notch_y_min = height // 6
+  notch_y_max = height // 3
+  mask[notch_y_min:notch_y_max, notch_x_min:notch_x_max] = False
+
+  tab_x_min = width * 5 // 8
+  tab_x_max = width * 3 // 4
+  tab_y_min = height * 2 // 3
+  tab_y_max = height * 5 // 6
+  mask[tab_y_min:tab_y_max, tab_x_min:tab_x_max] = True
   return mask
+
+
+def orientation_candidates(image):
+  return {
+    "identity": image,
+    "flipud": np.flipud(image),
+    "fliplr": np.fliplr(image),
+    "flipud_fliplr": np.flipud(np.fliplr(image)),
+  }
+
+
+def compare_array_candidates(decoded_array, expected_array):
+  stats = {}
+  for name, candidate in orientation_candidates(decoded_array).items():
+    diff = np.abs(candidate.astype(np.int64) - expected_array.astype(np.int64))
+    stats[name] = {
+      "exact": bool(np.array_equal(candidate, expected_array)),
+      "max_diff": int(diff.max()) if diff.size else 0,
+    }
+  return stats
+
+
+def compare_mask_candidates(decoded_mask, expected_mask):
+  if decoded_mask is None:
+    return {
+      name: {
+        "exact": False,
+        "max_diff": 1,
+        "mismatch_pixels": int(expected_mask.size),
+      }
+      for name in ["identity", "flipud", "fliplr", "flipud_fliplr"]
+    }
+
+  stats = {}
+  for name, candidate in orientation_candidates(decoded_mask).items():
+    mismatch = np.logical_xor(candidate.astype(bool), expected_mask)
+    stats[name] = {
+      "exact": bool(not mismatch.any()),
+      "max_diff": int(mismatch.max()) if mismatch.size else 0,
+      "mismatch_pixels": int(mismatch.sum()),
+    }
+  return stats
 
 
 def compare_synthetic(decoded):
@@ -40,11 +98,12 @@ def compare_synthetic(decoded):
   index = header["index"]
 
   expected_rgb = build_synthetic_rgb(width, height, index)
-  rgb_diff = np.abs(decoded["rgb"].astype(np.int16) - expected_rgb.astype(np.int16))
+  rgb_candidates = compare_array_candidates(decoded["rgb"], expected_rgb)
+  rgb_bgr_candidates = compare_array_candidates(decoded["rgb"][..., ::-1], expected_rgb)
 
   decoded_depth_mm = np.rint(decoded["depth"] * 1000.0).astype(np.uint16)
   expected_depth_mm = build_synthetic_depth_mm(width, height)
-  depth_diff = np.abs(decoded_depth_mm.astype(np.int32) - expected_depth_mm.astype(np.int32))
+  depth_candidates = compare_array_candidates(decoded_depth_mm, expected_depth_mm)
 
   expected_K = np.array([
     [width * 0.9, 0.0, width * 0.5],
@@ -55,18 +114,23 @@ def compare_synthetic(decoded):
 
   if index == 0:
     expected_mask = build_synthetic_mask(width, height)
-    mask_exact = decoded["mask"] is not None and np.array_equal(decoded["mask"], expected_mask)
+    mask_candidates = compare_mask_candidates(decoded["mask"], expected_mask)
   else:
-    mask_exact = decoded["mask"] is None
+    mask_candidates = {
+      "expected_none": {
+        "exact": decoded["mask"] is None,
+        "max_diff": 0 if decoded["mask"] is None else 1,
+        "mismatch_pixels": 0 if decoded["mask"] is None else int(decoded["mask"].size),
+      }
+    }
 
   return {
-    "rgb_exact": bool(np.array_equal(decoded["rgb"], expected_rgb)),
-    "rgb_max_diff": int(rgb_diff.max()),
-    "depth_exact": bool(np.array_equal(decoded_depth_mm, expected_depth_mm)),
-    "depth_max_diff_mm": int(depth_diff.max()),
+    "rgb": rgb_candidates,
+    "rgb_bgr_swap": rgb_bgr_candidates,
+    "depth_mm": depth_candidates,
     "K_exact": bool(np.array_equal(decoded["K"], expected_K)),
     "K_max_diff": float(K_diff.max()),
-    "mask_exact": bool(mask_exact),
+    "mask": mask_candidates,
   }
 
 

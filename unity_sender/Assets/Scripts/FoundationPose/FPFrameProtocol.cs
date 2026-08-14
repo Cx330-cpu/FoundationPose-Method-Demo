@@ -136,11 +136,12 @@ namespace FoundationPoseStreaming
 
         public static byte[] EncodeRgb(byte[] rgb24, int width, int height, FPRgbCodec codec, int jpegQuality)
         {
+            byte[] encoderRgb = FlipRows(rgb24, width * 3, height);
             if (codec == FPRgbCodec.Jpeg)
             {
                 int quality = Mathf.Clamp(jpegQuality, 1, 100);
                 return ImageConversion.EncodeArrayToJPG(
-                    rgb24,
+                    encoderRgb,
                     GraphicsFormat.R8G8B8_UNorm,
                     (uint)width,
                     (uint)height,
@@ -149,7 +150,7 @@ namespace FoundationPoseStreaming
             }
 
             return ImageConversion.EncodeArrayToPNG(
-                rgb24,
+                encoderRgb,
                 GraphicsFormat.R8G8B8_UNorm,
                 (uint)width,
                 (uint)height,
@@ -160,8 +161,9 @@ namespace FoundationPoseStreaming
         {
             byte[] depthBytes = new byte[depthMillimeters.Length * sizeof(ushort)];
             Buffer.BlockCopy(depthMillimeters, 0, depthBytes, 0, depthBytes.Length);
+            byte[] encoderDepth = FlipRows(depthBytes, width * sizeof(ushort), height);
             return ImageConversion.EncodeArrayToPNG(
-                depthBytes,
+                encoderDepth,
                 GraphicsFormat.R16_UNorm,
                 (uint)width,
                 (uint)height,
@@ -170,12 +172,25 @@ namespace FoundationPoseStreaming
 
         public static byte[] EncodeMaskPng(byte[] maskU8, int width, int height)
         {
+            byte[] encoderMask = FlipRows(maskU8, width, height);
             return ImageConversion.EncodeArrayToPNG(
-                maskU8,
+                encoderMask,
                 GraphicsFormat.R8_UNorm,
                 (uint)width,
                 (uint)height,
                 0);
+        }
+
+        static byte[] FlipRows(byte[] source, int rowBytes, int height)
+        {
+            byte[] result = new byte[source.Length];
+            for (int y = 0; y < height; ++y)
+            {
+                int srcOffset = y * rowBytes;
+                int dstOffset = (height - 1 - y) * rowBytes;
+                Buffer.BlockCopy(source, srcOffset, result, dstOffset, rowBytes);
+            }
+            return result;
         }
 
         static void ValidateImageInputs(

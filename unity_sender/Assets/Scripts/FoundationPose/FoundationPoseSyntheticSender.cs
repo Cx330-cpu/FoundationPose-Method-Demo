@@ -103,7 +103,10 @@ namespace FoundationPoseStreaming
             {
                 for (int x = 0; x < width; ++x)
                 {
-                    depth[y * width + x] = (ushort)(700 + (x * 100 / Mathf.Max(1, width - 1)));
+                    depth[y * width + x] = (ushort)(
+                        700
+                        + (x * 100 / Mathf.Max(1, width - 1))
+                        + (y * 50 / Mathf.Max(1, height - 1)));
                 }
             }
             return depth;
@@ -112,13 +115,37 @@ namespace FoundationPoseStreaming
         static byte[] BuildSyntheticMask(int width, int height)
         {
             byte[] mask = new byte[width * height];
-            int xMin = width / 4;
-            int xMax = width * 3 / 4;
-            int yMin = height / 4;
-            int yMax = height * 3 / 4;
+            int xMin = width / 8;
+            int xMax = width / 2;
+            int yMin = height / 6;
+            int yMax = height / 2;
             for (int y = yMin; y < yMax; ++y)
             {
                 for (int x = xMin; x < xMax; ++x)
+                {
+                    mask[y * width + x] = 255;
+                }
+            }
+
+            int notchXMin = width / 8;
+            int notchXMax = width / 4;
+            int notchYMin = height / 6;
+            int notchYMax = height / 3;
+            for (int y = notchYMin; y < notchYMax; ++y)
+            {
+                for (int x = notchXMin; x < notchXMax; ++x)
+                {
+                    mask[y * width + x] = 0;
+                }
+            }
+
+            int tabXMin = width * 5 / 8;
+            int tabXMax = width * 3 / 4;
+            int tabYMin = height * 2 / 3;
+            int tabYMax = height * 5 / 6;
+            for (int y = tabYMin; y < tabYMax; ++y)
+            {
+                for (int x = tabXMin; x < tabXMax; ++x)
                 {
                     mask[y * width + x] = 255;
                 }
