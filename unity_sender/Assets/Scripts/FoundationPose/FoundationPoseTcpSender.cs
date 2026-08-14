@@ -23,6 +23,8 @@ namespace FoundationPoseStreaming
         public bool connectOnStart = true;
         public int connectTimeoutMs = 3000;
         public int sendTimeoutMs = 3000;
+        public int initialConnectDelayMs = 1000;
+        public int reconnectDelayMs = 1000;
 
         [Header("Logging")]
         public bool verboseLogging = true;
@@ -190,18 +192,62 @@ namespace FoundationPoseStreaming
         {
             try
             {
-                client = new TcpClient();
-                client.NoDelay = true;
-                client.SendTimeout = sendTimeoutMs;
-                ConnectWithTimeout(client, host, port, connectTimeoutMs);
-                stream = client.GetStream();
-
-                lock (gate)
+                if (WaitForStop(initialConnectDelayMs))
                 {
-                    state = FPSenderState.WaitingForRegistrationFrame;
+                    return;
                 }
 
-                Log($"Connected to FoundationPose server {host}:{port}");
+                int connectAttempt = 0;
+                while (!stopRequested)
+                {
+                    connectAttempt++;
+                    lock (gate)
+                    {
+                        state = FPSenderState.Connecting;
+                    }
+
+                    try
+                    {
+                        CloseSocket();
+                        client = new TcpClient();
+                        client.NoDelay = true;
+                        client.SendTimeout = sendTimeoutMs;
+
+                        Log($"Connecting to FoundationPose server host={host} port={port} attempt={connectAttempt}");
+                        ConnectWithTimeout(client, host, port, connectTimeoutMs);
+                        stream = client.GetStream();
+                        lastError = null;
+
+                        lock (gate)
+                        {
+                            state = FPSenderState.WaitingForRegistrationFrame;
+                        }
+
+                        Log($"Connected to FoundationPose server host={host} port={port} attempt={connectAttempt} local={client.Client.LocalEndPoint} remote={client.Client.RemoteEndPoint}");
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        if (stopRequested)
+                        {
+                            return;
+                        }
+
+                        lastError = ex.ToString();
+                        LogConnectFailure(connectAttempt, ex);
+                        CloseSocket();
+
+                        if (WaitForStop(reconnectDelayMs))
+                        {
+                            return;
+                        }
+                    }
+                }
+
+                if (stopRequested)
+                {
+                    return;
+                }
 
                 while (!stopRequested)
                 {
@@ -316,6 +362,24 @@ namespace FoundationPoseStreaming
             }
 
             tcpClient.EndConnect(result);
+        }
+
+        bool WaitForStop(int delayMs)
+        {
+            if (delayMs <= 0)
+            {
+                return stopRequested;
+            }
+
+            return frameAvailable.WaitOne(delayMs) && stopRequested;
+        }
+
+        void LogConnectFailure(int attempt, Exception ex)
+        {
+            SocketException socketException = ex as SocketException ?? ex.GetBaseException() as SocketException;
+            string socketErrorCode = socketException == null ? "n/a" : socketException.SocketErrorCode.ToString();
+            string nativeErrorCode = socketException == null ? "n/a" : socketException.NativeErrorCode.ToString();
+            Debug.LogWarning($"[FoundationPoseTcpSender] Connect failed host={host} port={port} attempt={attempt} SocketErrorCode={socketErrorCode} NativeErrorCode={nativeErrorCode} Message={ex.Message}");
         }
 
         void Log(string message)
