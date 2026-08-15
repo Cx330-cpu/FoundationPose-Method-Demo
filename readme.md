@@ -67,6 +67,7 @@ year          = {2023},
 1) [Optional] Download our preprocessed reference views [here](https://drive.google.com/drive/folders/1PXXCOJqHXwQTbwPwPbGDN9_vLVe0XpFS?usp=sharing) in order to run model-free few-shot version.
 
 # Env setup option 1: docker (recommended)
+## Original Docker environment (RTX 3070 / older CUDA path)
   ```
   cd docker/
   docker pull wenbowen123/foundationpose && docker tag wenbowen123/foundationpose foundationpose  # Or to build from scratch: docker build --network host -t foundationpose .
@@ -82,6 +83,34 @@ bash build_all.sh
 Later you can execute into the container without re-build.
 ```
 docker exec -it foundationpose bash
+```
+
+## RTX 5070 Ti Docker environment
+
+RTX 5070 Ti is a Blackwell GPU (`sm_120`), so the original CUDA 11.x image used for RTX 3070 is not suitable. Use the CUDA 12.8 / PyTorch nightly image instead:
+
+```
+cd docker/
+bash build_5070ti.sh
+bash run_container_5070ti.sh
+```
+
+Inside the container, build the local extension once:
+
+```
+bash docker/build_extensions_5070ti.sh
+```
+
+Then run the demo:
+
+```
+bash docker/run_demo_5070ti.sh
+```
+
+Use `DEBUG=0` for headless mode or `DEBUG=2` to save visualization frames:
+
+```
+DEBUG=2 bash docker/run_demo_5070ti.sh
 ```
 
 For more recent GPU such as 4090, refer to [this](https://github.com/NVlabs/FoundationPose/issues/27).

@@ -1,0 +1,14 @@
+.git
+.agents
+.codex
+.conda-envs
+.pip-cache
+.third_party_src
+.tools
+__pycache__
+**/__pycache__
+*.pyc
+debug
+debug_*
+mycpp/build
+mycpp/build_old_cpython38_root

@@ -128,6 +128,10 @@ celerybeat.pid
 # Environments
 .env
 .venv
+.conda-envs/
+.pip-cache/
+.third_party_src/
+.tools/
 env/
 venv/
 ENV/
@@ -157,3 +161,11 @@ data/
 logs/
 !BundleTrack/XMem/inference/data
 run_used.yml
+
+# Local Codex/session files
+.agents/
+.codex/
+
+# Native extension build outputs
+mycpp/build/
+mycpp/build_*/

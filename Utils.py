@@ -42,7 +42,7 @@ try:
 except Exception:
   kornia = None
 try:
-  _mycpp_build = os.path.join(code_dir, 'mycpp', 'build')
+  _mycpp_build = os.environ.get('FOUNDATIONPOSE_MYCPP_BUILD_DIR', os.path.join(code_dir, 'mycpp', 'build'))
   if os.path.isdir(_mycpp_build):
     sys.path.insert(0, _mycpp_build)
   import mycpp

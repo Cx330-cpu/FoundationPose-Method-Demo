@@ -57,7 +57,7 @@ def main() -> int:
       errors.append(f"import {mod}: {e}")
 
   # --- Native extension ---
-  build_dir = repo_root / "mycpp" / "build"
+  build_dir = Path(os.environ.get("FOUNDATIONPOSE_MYCPP_BUILD_DIR", repo_root / "mycpp" / "build"))
   so_files = list(build_dir.glob("mycpp*.so"))
   if not so_files:
     warnings.append(f"No mycpp extension found under {build_dir} (run bash build_all_conda.sh).")
