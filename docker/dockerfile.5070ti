@@ -8,6 +8,9 @@ ENV OPENCV_IO_ENABLE_OPENEXR=1
 ENV PYTHONNOUSERSITE=1
 ENV TORCH_CUDA_ARCH_LIST=12.0
 ENV FORCE_CUDA=1
+ENV MAX_JOBS=1
+ENV CMAKE_BUILD_PARALLEL_LEVEL=1
+ENV NVCC_THREADS=1
 ENV SHELL=/bin/bash
 
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
@@ -53,12 +56,12 @@ RUN python -m pip install open3d
 RUN cd /opt && \
     git clone --depth 1 https://github.com/facebookresearch/pytorch3d.git && \
     cd pytorch3d && \
-    python -m pip install --no-build-isolation .
+    MAX_JOBS=1 CMAKE_BUILD_PARALLEL_LEVEL=1 NVCC_THREADS=1 python -m pip install --no-build-isolation .
 
 RUN cd /opt && \
     git clone --depth 1 https://github.com/NVlabs/nvdiffrast.git && \
     cd nvdiffrast && \
-    python -m pip install --no-build-isolation .
+    MAX_JOBS=1 CMAKE_BUILD_PARALLEL_LEVEL=1 NVCC_THREADS=1 python -m pip install --no-build-isolation .
 
 RUN ln -sf /bin/bash /bin/sh
 

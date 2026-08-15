@@ -15,6 +15,39 @@ from learning.training.predict_pose_refine import *
 import yaml
 
 
+def cluster_poses_py(angle_diff, dist_diff, poses_in, symmetry_tfs):
+  poses_in = np.asarray(poses_in, dtype=np.float32)
+  symmetry_tfs = np.asarray(symmetry_tfs, dtype=np.float32)
+  if len(poses_in) == 0:
+    return poses_in
+
+  poses_out = [poses_in[0]]
+  radian_thres = angle_diff / 180.0 * np.pi
+
+  for cur_pose in poses_in[1:]:
+    isnew = True
+    for cluster in poses_out:
+      if np.linalg.norm(cluster[:3, 3] - cur_pose[:3, 3]) >= dist_diff:
+        continue
+
+      for tf in symmetry_tfs:
+        cur_pose_tmp = cur_pose @ tf
+        R = cur_pose_tmp[:3, :3] @ cluster[:3, :3].T
+        cos_theta = (np.trace(R) - 1.0) / 2.0
+        rot_diff = np.arccos(np.clip(cos_theta, -1.0, 1.0))
+        if rot_diff < radian_thres:
+          isnew = False
+          break
+
+      if not isnew:
+        break
+
+    if isnew:
+      poses_out.append(cur_pose)
+
+  return np.asarray(poses_out, dtype=np.float32)
+
+
 class FoundationPose:
   def __init__(self, model_pts, model_normals, symmetry_tfs=None, mesh=None, scorer:ScorePredictor=None, refiner:PoseRefinePredictor=None, glctx=None, debug=0, debug_dir='/home/bowen/debug/novel_pose_debug/'):
     self.gt_pose = None
@@ -117,7 +150,10 @@ class FoundationPose:
 
     rot_grid = np.asarray(rot_grid)
     logging.info(f"rot_grid:{rot_grid.shape}")
-    rot_grid = mycpp.cluster_poses(30, 99999, rot_grid, self.symmetry_tfs.data.cpu().numpy())
+    if os.environ.get('FOUNDATIONPOSE_USE_PY_CLUSTER') == '1' or mycpp is None or not hasattr(mycpp, 'cluster_poses'):
+      rot_grid = cluster_poses_py(30, 99999, rot_grid, self.symmetry_tfs.data.cpu().numpy())
+    else:
+      rot_grid = mycpp.cluster_poses(30, 99999, rot_grid, self.symmetry_tfs.data.cpu().numpy())
     rot_grid = np.asarray(rot_grid)
     logging.info(f"after cluster, rot_grid:{rot_grid.shape}")
     self.rot_grid = torch.as_tensor(rot_grid, device='cuda', dtype=torch.float)
@@ -266,5 +302,3 @@ class FoundationPose:
       extra['vis'] = vis
     self.pose_last = pose
     return (pose@self.get_tf_to_centered_mesh()).data.cpu().numpy().reshape(4,4)
-
-
