@@ -59,6 +59,11 @@ RUN cd /opt && \
     MAX_JOBS=1 CMAKE_BUILD_PARALLEL_LEVEL=1 NVCC_THREADS=1 python -m pip install --no-build-isolation .
 
 RUN cd /opt && \
+    git clone --recursive --depth 1 https://github.com/NVIDIAGameWorks/kaolin.git && \
+    cd kaolin && \
+    MAX_JOBS=1 CMAKE_BUILD_PARALLEL_LEVEL=1 NVCC_THREADS=1 FORCE_CUDA=1 python -m pip install --no-build-isolation -v .
+
+RUN cd /opt && \
     git clone --depth 1 https://github.com/NVlabs/nvdiffrast.git && \
     cd nvdiffrast && \
     MAX_JOBS=1 CMAKE_BUILD_PARALLEL_LEVEL=1 NVCC_THREADS=1 python -m pip install --no-build-isolation .

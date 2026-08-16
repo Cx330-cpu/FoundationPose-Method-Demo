@@ -13,3 +13,6 @@ cmake .. \
   -DPython3_EXECUTABLE="$(command -v python)" \
   -DPYBIND11_PYTHON_EXECUTABLE="$(command -v python)"
 ninja -j"$(nproc)"
+
+cd "${ROOT}/bundlesdf/mycuda"
+python -m pip install --no-build-isolation -e .

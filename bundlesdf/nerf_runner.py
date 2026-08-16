@@ -771,10 +771,17 @@ class NerfRunner:
 
     rays_o_w = transform_pts(rays_o,tf)
     viewdirs_w = (tf[:,:3,:3]@viewdirs[:,None].permute(0,2,1))[:,:3,0]
-    voxel_size = self.cfg['octree_raytracing_voxel_size']*self.cfg['sc_factor']
-    level = int(np.floor(np.log2(2.0/voxel_size)))
-    near,far,_,depths_in_out = self.octree_m.ray_trace(rays_o_w,viewdirs_w,level=level,debug=0)
-    z_vals,_ = self.sample_rays_uniform_occupied_voxels(rays_d=viewdirs,depths_in_out=depths_in_out,lindisp=lindisp,perturb=perturb, depths=depth, N_samples=self.cfg['N_samples'])
+    if self.cfg['use_octree']:
+      voxel_size = self.cfg['octree_raytracing_voxel_size']*self.cfg['sc_factor']
+      level = int(np.floor(np.log2(2.0/voxel_size)))
+      near,far,_,depths_in_out = self.octree_m.ray_trace(rays_o_w,viewdirs_w,level=level,debug=0)
+      z_vals,_ = self.sample_rays_uniform_occupied_voxels(rays_d=viewdirs,depths_in_out=depths_in_out,lindisp=lindisp,perturb=perturb, depths=depth, N_samples=self.cfg['N_samples'])
+    else:
+      depths_in_out = None
+      near = torch.full((N_rays,), self.cfg['near']*self.cfg['sc_factor'], device=ray_batch.device).float()
+      far = torch.full((N_rays,), self.cfg['far']*self.cfg['sc_factor'], device=ray_batch.device).float()
+      z_vals = sample_rays_uniform(self.cfg['N_samples'], near.reshape(-1,1), far.reshape(-1,1), lindisp=lindisp, perturb=perturb)
+    valid_samples = torch.ones(z_vals.shape, dtype=torch.bool, device=ray_batch.device)
 
     if self.cfg['N_samples_around_depth']>0 and depth is not None:      #!NOTE only fine when depths are all valid
       valid_depth_mask = (depth>=self.cfg['near']*self.cfg['sc_factor']) & (depth<=self.cfg['far']*self.cfg['sc_factor'])
@@ -1135,7 +1142,10 @@ class NerfRunner:
     tex_image = torch.zeros((tex_res,tex_res,3)).cuda().float()
     weight_tex_image = torch.zeros(tex_image.shape[:-1]).cuda().float()
     mesh.merge_vertices()
-    mesh.remove_duplicate_faces()
+    if hasattr(mesh, 'remove_duplicate_faces'):
+      mesh.remove_duplicate_faces()
+    else:
+      mesh.update_faces(mesh.unique_faces())
     mesh = mesh.unwrap()
     H,W = tex_image.shape[:2]
     uvs_tex = (mesh.visual.uv*np.array([W-1,H-1]).reshape(1,2))    #(n_V,2)
