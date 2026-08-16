@@ -142,14 +142,17 @@ class NetworkFrameProvider(FrameProvider):
       index=header["index"],
     )
 
-  def send_control(self, payload):
+  def send_json_message(self, magic, payload):
     payload = {
-      "magic": "FPCONTROL",
+      "magic": magic,
       "version": 1,
       **payload,
     }
     data = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
     self.client_sock.sendall(struct.pack(">I", len(data)) + data)
+
+  def send_control(self, payload):
+    self.send_json_message("FPCONTROL", payload)
 
   def request_mask(self, frame_id, reason, request_frames):
     self.send_control({
@@ -158,6 +161,9 @@ class NetworkFrameProvider(FrameProvider):
       "reason": str(reason),
       "request_frames": int(request_frames),
     })
+
+  def send_result(self, payload):
+    self.send_json_message("FPRESULT", payload)
 
   def close(self):
     for sock in [getattr(self, "client_sock", None), getattr(self, "server_sock", None)]:
@@ -249,6 +255,76 @@ def projected_bbox_rect(K, pose, to_origin, bbox, image_shape):
   return {
     "rect": (x0, y0, x1, y1),
     "visible_ratio": float(clipped_area / raw_area),
+  }
+
+
+def project_points_2d(K, pose, pts):
+  pts_h = np.concatenate([pts, np.ones((len(pts), 1), dtype=pts.dtype)], axis=1)
+  pts_cam = (pose @ pts_h.T).T[:, :3]
+  valid = pts_cam[:, 2] > 0.001
+  uv = np.full((len(pts), 2), np.nan, dtype=np.float64)
+  if valid.any():
+    uv[valid, 0] = K[0, 0] * pts_cam[valid, 0] / pts_cam[valid, 2] + K[0, 2]
+    uv[valid, 1] = K[1, 1] * pts_cam[valid, 1] / pts_cam[valid, 2] + K[1, 2]
+  return uv, valid
+
+
+def line_from_uv(uv, valid, i, j):
+  if not (valid[i] and valid[j]):
+    return None
+  return [[float(uv[i, 0]), float(uv[i, 1])], [float(uv[j, 0]), float(uv[j, 1])]]
+
+
+def make_pose_result(packet, pose, to_origin, bbox, state, operation, fps):
+  center_pose = pose @ np.linalg.inv(to_origin)
+  corners = bbox_corners(bbox)
+  uv, valid = project_points_2d(packet.K, center_pose, corners)
+  # bbox_corners order is x outer, y middle, z inner. Edges connect points
+  # whose corner coordinates differ along exactly one axis.
+  bbox_lines = []
+  for i in range(len(corners)):
+    for j in range(i + 1, len(corners)):
+      if np.sum(np.abs(corners[i] - corners[j]) > 1e-9) == 1:
+        line = line_from_uv(uv, valid, i, j)
+        if line is not None:
+          bbox_lines.append(line)
+
+  scale = 0.1
+  axis_pts = np.array(
+    [
+      [0.0, 0.0, 0.0],
+      [scale, 0.0, 0.0],
+      [0.0, scale, 0.0],
+      [0.0, 0.0, scale],
+    ],
+    dtype=np.float64,
+  )
+  axis_uv, axis_valid = project_points_2d(packet.K, center_pose, axis_pts)
+  axis_specs = [
+    ("x", [255, 0, 0], 1),
+    ("y", [0, 255, 0], 2),
+    ("z", [0, 0, 255], 3),
+  ]
+  axis_lines = []
+  for name, color, idx in axis_specs:
+    line = line_from_uv(axis_uv, axis_valid, 0, idx)
+    if line is not None:
+      axis_lines.append({"name": name, "color": color, "from": line[0], "to": line[1]})
+
+  H, W = packet.rgb.shape[:2]
+  return {
+    "type": "tracking_result",
+    "frame_id": str(packet.frame_id),
+    "index": int(packet.index),
+    "timestamp": packet.timestamp,
+    "state": str(state),
+    "operation": str(operation),
+    "processing_fps": float(fps),
+    "image_width": int(W),
+    "image_height": int(H),
+    "ob_in_cam": pose.reshape(4, 4).astype(float).tolist(),
+    "bbox_lines_2d": bbox_lines,
+    "axis_lines_2d": axis_lines,
   }
 
 
@@ -368,6 +444,12 @@ def run_live(args):
       processing_time = time.perf_counter() - start_time
       fps = 1.0 / processing_time if processing_time > 0 else np.inf
 
+      if args.send_results and hasattr(provider, "send_result"):
+        try:
+          provider.send_result(make_pose_result(packet, pose, to_origin, bbox, state, operation, fps))
+        except Exception as exc:
+          logging.info(f"failed to send FPRESULT for frame {packet.frame_id}: {exc}")
+
       np.savetxt(f'{debug_dir}/ob_in_cam/{packet.frame_id}.txt', pose.reshape(4,4))
       print_pose_report(packet=packet, pose=pose, state=state, operation=operation, processing_time=processing_time, fps=fps)
       previous_pose = pose.copy()
@@ -416,5 +498,7 @@ if __name__=='__main__':
   parser.add_argument('--lost_min_bbox_depth_ratio', type=float, default=0.05)
   parser.add_argument('--lost_max_translation_delta', type=float, default=0.25)
   parser.add_argument('--lost_max_rotation_delta_deg', type=float, default=55.0)
+  parser.add_argument('--send_results', action='store_true', default=True)
+  parser.add_argument('--no_send_results', dest='send_results', action='store_false')
   args = parser.parse_args()
   run_live(args)
