@@ -21,6 +21,7 @@ from typing import Optional
 import time
 import shutil
 import socket
+import threading
 import cv2
 import imageio.v2 as imageio
 import numpy as np
@@ -36,6 +37,7 @@ class FramePacket:
   timestamp: Optional[float]
   frame_id: str
   index: int
+  pc_received_time: float
 
 
 class FrameProvider(ABC):
@@ -108,15 +110,22 @@ class RecordedFoundationPoseProvider(FrameProvider):
       timestamp=self._timestamp_from_frame_id(frame_id),
       frame_id=frame_id,
       index=i,
+      pc_received_time=time.time(),
     )
     self.index += 1
     return packet
 
 
 class NetworkFrameProvider(FrameProvider):
-  def __init__(self, host, port):
+  def __init__(self, host, port, latest_only=False):
     self.host = host
     self.port = port
+    self.latest_only = latest_only
+    self.latest_packet = None
+    self.stream_ended = False
+    self.lock = threading.Lock()
+    self.send_lock = threading.Lock()
+    self.new_frame_event = threading.Event()
     self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     self.server_sock.bind((host, port))
@@ -124,8 +133,11 @@ class NetworkFrameProvider(FrameProvider):
     logging.info(f"waiting for frame sender on {host}:{port}")
     self.client_sock, self.client_addr = self.server_sock.accept()
     logging.info(f"accepted frame sender from {self.client_addr}")
+    if self.latest_only:
+      self.receiver_thread = threading.Thread(target=self._receive_loop, daemon=True)
+      self.receiver_thread.start()
 
-  def get_frame(self) -> Optional[FramePacket]:
+  def _receive_next_packet(self) -> Optional[FramePacket]:
     try:
       decoded = receive_frame(self.client_sock)
     except StreamEnd:
@@ -140,7 +152,35 @@ class NetworkFrameProvider(FrameProvider):
       timestamp=header["timestamp"],
       frame_id=header["frame_id"],
       index=header["index"],
+      pc_received_time=time.time(),
     )
+
+  def _receive_loop(self):
+    while True:
+      packet = self._receive_next_packet()
+      with self.lock:
+        if packet is None:
+          self.stream_ended = True
+          self.new_frame_event.set()
+          return
+        self.latest_packet = packet
+        self.new_frame_event.set()
+
+  def get_frame(self) -> Optional[FramePacket]:
+    if not self.latest_only:
+      return self._receive_next_packet()
+
+    while True:
+      self.new_frame_event.wait(timeout=0.1)
+      with self.lock:
+        if self.latest_packet is not None:
+          packet = self.latest_packet
+          self.latest_packet = None
+          if not self.stream_ended:
+            self.new_frame_event.clear()
+          return packet
+        if self.stream_ended:
+          return None
 
   def send_json_message(self, magic, payload):
     payload = {
@@ -149,7 +189,8 @@ class NetworkFrameProvider(FrameProvider):
       **payload,
     }
     data = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
-    self.client_sock.sendall(struct.pack(">I", len(data)) + data)
+    with self.send_lock:
+      self.client_sock.sendall(struct.pack(">I", len(data)) + data)
 
   def send_control(self, payload):
     self.send_json_message("FPCONTROL", payload)
@@ -208,6 +249,69 @@ def rotation_geodesic_angle(R1, R2):
   rel = R1.T @ R2
   value = (np.trace(rel) - 1.0) * 0.5
   return float(math.acos(float(np.clip(value, -1.0, 1.0))))
+
+
+def rotation_matrix_to_quat(R):
+  m = np.asarray(R, dtype=np.float64)
+  trace = np.trace(m)
+  if trace > 0:
+    s = math.sqrt(trace + 1.0) * 2.0
+    q = np.array([0.25 * s, (m[2, 1] - m[1, 2]) / s, (m[0, 2] - m[2, 0]) / s, (m[1, 0] - m[0, 1]) / s])
+  else:
+    i = int(np.argmax(np.diag(m)))
+    if i == 0:
+      s = math.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2]) * 2.0
+      q = np.array([(m[2, 1] - m[1, 2]) / s, 0.25 * s, (m[0, 1] + m[1, 0]) / s, (m[0, 2] + m[2, 0]) / s])
+    elif i == 1:
+      s = math.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2]) * 2.0
+      q = np.array([(m[0, 2] - m[2, 0]) / s, (m[0, 1] + m[1, 0]) / s, 0.25 * s, (m[1, 2] + m[2, 1]) / s])
+    else:
+      s = math.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1]) * 2.0
+      q = np.array([(m[1, 0] - m[0, 1]) / s, (m[0, 2] + m[2, 0]) / s, (m[1, 2] + m[2, 1]) / s, 0.25 * s])
+  return q / max(np.linalg.norm(q), 1e-12)
+
+
+def quat_to_rotation_matrix(q):
+  w, x, y, z = q / max(np.linalg.norm(q), 1e-12)
+  return np.array(
+    [
+      [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+      [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+      [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+    ],
+    dtype=np.float64,
+  )
+
+
+def slerp_quat(q0, q1, alpha):
+  q0 = q0 / max(np.linalg.norm(q0), 1e-12)
+  q1 = q1 / max(np.linalg.norm(q1), 1e-12)
+  dot = float(np.dot(q0, q1))
+  if dot < 0.0:
+    q1 = -q1
+    dot = -dot
+  if dot > 0.9995:
+    q = q0 + alpha * (q1 - q0)
+    return q / max(np.linalg.norm(q), 1e-12)
+  theta_0 = math.acos(float(np.clip(dot, -1.0, 1.0)))
+  theta = theta_0 * alpha
+  sin_theta = math.sin(theta)
+  sin_theta_0 = math.sin(theta_0)
+  s0 = math.cos(theta) - dot * sin_theta / sin_theta_0
+  s1 = sin_theta / sin_theta_0
+  return s0 * q0 + s1 * q1
+
+
+def smooth_pose(previous_pose, current_pose, alpha):
+  if previous_pose is None or alpha >= 1.0:
+    return current_pose.copy()
+  alpha = float(np.clip(alpha, 0.0, 1.0))
+  out = current_pose.copy()
+  out[:3, 3] = (1.0 - alpha) * previous_pose[:3, 3] + alpha * current_pose[:3, 3]
+  q0 = rotation_matrix_to_quat(previous_pose[:3, :3])
+  q1 = rotation_matrix_to_quat(current_pose[:3, :3])
+  out[:3, :3] = quat_to_rotation_matrix(slerp_quat(q0, q1, alpha))
+  return out
 
 
 def projected_bbox_mask_overlap(K, pose, to_origin, bbox, mask):
@@ -390,7 +494,7 @@ def run_live(args):
   if args.provider == "recorded":
     provider = RecordedFoundationPoseProvider(video_dir=args.test_scene_dir, shorter_side=None, zfar=np.inf)
   elif args.provider == "network":
-    provider = NetworkFrameProvider(host=args.host, port=args.port)
+    provider = NetworkFrameProvider(host=args.host, port=args.port, latest_only=args.latest_frame_only)
   else:
     raise RuntimeError(f"unknown provider: {args.provider}")
 
@@ -399,6 +503,7 @@ def run_live(args):
     last_register_index = None
     last_mask_request_index = None
     previous_pose = None
+    previous_display_pose = None
     while True:
       packet = provider.get_frame()
       if packet is None:
@@ -408,6 +513,7 @@ def run_live(args):
       validate_frame_packet(packet)
       logging.info(f'i:{packet.index}')
 
+      wall_start_time = time.time()
       start_time = time.perf_counter()
       if state == "UNREGISTERED":
         if packet.mask is None:
@@ -443,10 +549,18 @@ def run_live(args):
 
       processing_time = time.perf_counter() - start_time
       fps = 1.0 / processing_time if processing_time > 0 else np.inf
+      display_pose = smooth_pose(previous_display_pose, pose, args.result_smoothing_alpha)
+      previous_display_pose = display_pose.copy()
 
       if args.send_results and hasattr(provider, "send_result"):
         try:
-          provider.send_result(make_pose_result(packet, pose, to_origin, bbox, state, operation, fps))
+          result = make_pose_result(packet, display_pose, to_origin, bbox, state, operation, fps)
+          result["raw_ob_in_cam"] = pose.reshape(4, 4).astype(float).tolist()
+          result["pc_received_time"] = float(packet.pc_received_time)
+          result["pc_result_time"] = float(time.time())
+          result["pc_queue_latency_ms"] = float(max(0.0, wall_start_time - packet.pc_received_time) * 1000.0)
+          result["smoothing_alpha"] = float(args.result_smoothing_alpha)
+          provider.send_result(result)
         except Exception as exc:
           logging.info(f"failed to send FPRESULT for frame {packet.frame_id}: {exc}")
 
@@ -455,7 +569,7 @@ def run_live(args):
       previous_pose = pose.copy()
 
       if debug >= 1 or args.save_track_vis:
-        vis = draw_live_overlay(packet=packet, pose=pose, to_origin=to_origin, bbox=bbox, state=state, operation=operation, fps=fps)
+        vis = draw_live_overlay(packet=packet, pose=display_pose, to_origin=to_origin, bbox=bbox, state=state, operation=operation, fps=fps)
 
       if debug >= 1:
         cv2.imshow('FoundationPose Live', vis[...,::-1])
@@ -485,9 +599,9 @@ if __name__=='__main__':
   parser.add_argument('--provider', choices=['recorded', 'network'], default='recorded')
   parser.add_argument('--host', type=str, default='0.0.0.0')
   parser.add_argument('--port', type=int, default=5000)
-  parser.add_argument('--mask_recovery', action='store_true', default=True)
+  parser.add_argument('--mask_recovery', action='store_true', default=False)
   parser.add_argument('--no_mask_recovery', dest='mask_recovery', action='store_false')
-  parser.add_argument('--mask_recovery_interval', type=int, default=8)
+  parser.add_argument('--mask_recovery_interval', type=int, default=0)
   parser.add_argument('--mask_recovery_min_gap', type=int, default=3)
   parser.add_argument('--mask_recovery_min_overlap', type=float, default=0.15)
   parser.add_argument('--mask_request', action='store_true', default=True)
@@ -500,5 +614,8 @@ if __name__=='__main__':
   parser.add_argument('--lost_max_rotation_delta_deg', type=float, default=55.0)
   parser.add_argument('--send_results', action='store_true', default=True)
   parser.add_argument('--no_send_results', dest='send_results', action='store_false')
+  parser.add_argument('--latest_frame_only', action='store_true', default=True)
+  parser.add_argument('--no_latest_frame_only', dest='latest_frame_only', action='store_false')
+  parser.add_argument('--result_smoothing_alpha', type=float, default=1.0)
   args = parser.parse_args()
   run_live(args)
