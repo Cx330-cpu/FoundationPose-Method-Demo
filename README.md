@@ -2,6 +2,14 @@
 
 NVIDIA [FoundationPose](https://nvlabs.github.io/FoundationPose/)（CVPR 2024）的本地工程副本，用来做 **RGB-D 6DoF 位姿估计与跟踪**，并接到 **PC 实时推理 + iPhone/Unity TCP 推流**。
 
+**本仓库默认 demo 物体是杯子。** 已训练好的杯子 mesh 在：
+
+```text
+demo_data/polycam_verify/ob_0000001/model/model.obj
+```
+
+`run_live.py` 默认就加载这个模型，对画面里那只杯子做 6DoF 姿态（第一帧 REGISTER，之后 TRACK）。官方 `run_demo.py` 不传参时仍是 NVIDIA 芥末瓶 `mustard0`，只用来验证 GPU。
+
 上游论文、BOP 排行榜、训练数据说明见同目录的 [`readme.md`](readme.md)。本文件只写：**这个仓库是什么、怎么在本机（尤其是 RTX 5070 Ti + Docker）跑起来。**
 
 许可证为 NVIDIA Source Code License，**仅限非商业研究/评估**。
@@ -30,6 +38,32 @@ NVIDIA [FoundationPose](https://nvlabs.github.io/FoundationPose/)（CVPR 2024）
 可选    经 TCP 把 Unity/iPhone 的 RGB-D 送到本机 GPU
 ```
 
+### 默认物体：杯子
+
+实时路径默认识别 **Polycam YOLO 重建的那只杯子**，不是芥末瓶。
+
+已训练完成的模型（Neural Object Field 导出，**磁盘上最新一份**，2026-08-16 11:14，24 张精选参考视图）：
+
+```text
+demo_data/polycam_verify/ob_0000001/model/model.obj
+```
+
+`polycam_cup_yolo_all` 是更早的 36 帧杯子重建，不要用那份。
+
+配套参考视图（RGB / depth_enhanced / mask / K.txt）：
+
+```text
+demo_data/polycam_verify/ob_0000001/
+```
+
+Unity 第一帧 mask 必须罩住这只杯子。Live 在容器内直接：
+
+```bash
+python run_live.py --provider network --host 0.0.0.0 --port 5000 --debug 0 --debug_dir debug_live_cup
+```
+
+不传 `--mesh_file` 也会用上面的杯子 OBJ。换物体时再改 `--mesh_file`。
+
 当前状态：
 
 | 能力 | 状态 |
@@ -46,14 +80,15 @@ NVIDIA [FoundationPose](https://nvlabs.github.io/FoundationPose/)（CVPR 2024）
 
 | 路径 | 作用 |
 |---|---|
-| `run_demo.py` | 官方 demo：mustard0 上 register→track |
-| `run_live.py` | 实时入口：`--provider recorded` 或 `network` |
+| `run_demo.py` | 官方 GPU 冒烟：芥末瓶 `mustard0`（不是本项目默认杯子） |
+| `run_live.py` | 实时入口；默认 mesh 为已训练杯子 `polycam_verify/.../model.obj` |
 | `send_recorded_frames.py` | 把 recorded 序列以 FPFRAME 发给 PC |
 | `measure_tcp_latency.py` | 本机 TCP 时延测量（会读 `FPRESULT`） |
 | `check_env.py` | 检查 CUDA、扩展、权重、demo |
 | `docker/` | 3070 原镜像 + **5070 Ti（CUDA 12.8）** |
 | `weights/` | scorer / refiner 权重（需下载） |
-| `demo_data/mustard0/` | 官方 demo 序列 |
+| `demo_data/mustard0/` | 官方芥末瓶序列（仅 GPU 回归） |
+| `demo_data/polycam_verify/` | **最新杯子模型**（YOLO `cup` + 24 视图重建） |
 | `unity_sender/` | Unity 发送端 C# 参考脚本 |
 | `docs/POLYCAM_MODEL_FREE.md` | Polycam → model-free 重建 |
 
@@ -159,7 +194,7 @@ python check_env.py --demo-data
 
 以下均在 **容器内、项目根目录**。无 GUI 时用 `--debug 0` 或 `DEBUG=0`。
 
-### A. 官方 demo（最快验证 GPU）
+### A. 官方芥末瓶 demo（只验证 GPU，不是杯子）
 
 有窗口：
 
@@ -189,25 +224,25 @@ python run_demo.py --debug 0 --debug_dir debug_5070ti_docker
 
 第一帧 REGISTER 会明显慢（约 1–3 秒），后面 TRACK。第一次还可能触发 CUDA/nvdiffrast 编译，更慢。结果在 `--debug_dir`。
 
-### B. Recorded live（本仓库主路径，推荐）
+### B. Recorded live（回放已训练杯子的参考视图）
 
-用磁盘上的 mustard0 当「相机」，走 `run_live.py` 状态机（和 TCP 同一套代码）：
+用杯子参考视图当「相机」，mesh 用已训练的 `model.obj`（`run_live.py` 默认就是这两条路径）：
 
 ```bash
-mkdir -p results_today/live_logged_full
+mkdir -p results_today/live_cup
 python -u run_live.py \
   --provider recorded \
   --debug 0 \
-  --test_scene_dir demo_data/mustard0 \
-  --mesh_file demo_data/mustard0/mesh/textured_simple.obj \
-  --debug_dir results_today/live_logged_full \
-  > results_today/live_logged_full/run.log 2>&1
+  --test_scene_dir demo_data/polycam_verify/ob_0000001 \
+  --mesh_file demo_data/polycam_verify/ob_0000001/model/model.obj \
+  --debug_dir results_today/live_cup \
+  > results_today/live_cup/run.log 2>&1
 ```
 
 成功标志：
 
 - 日志末尾：`frame provider reached end of stream`
-- `results_today/live_logged_full/ob_in_cam/` 里 **737** 个 `*.txt`（4×4 pose）
+- `results_today/live_cup/ob_in_cam/` 里有每帧 4×4 pose txt
 - log 里第一帧 `operation: REGISTER`，其余 `TRACK`
 
 常用参数：
@@ -223,8 +258,8 @@ python -u run_live.py \
 看 REGISTER / TRACK 耗时：
 
 ```bash
-grep -a -n "operation: REGISTER" -A3 results_today/live_logged_full/run.log | head
-grep -a -c "operation: TRACK" results_today/live_logged_full/run.log
+grep -a -n "operation: REGISTER" -A3 results_today/live_cup/run.log | head
+grep -a -c "operation: TRACK" results_today/live_cup/run.log
 ```
 
 ### C. 本机 TCP（PC 听端口 + 发 recorded 帧）
@@ -239,7 +274,7 @@ python -u run_live.py \
   --debug 0 \
   --host 0.0.0.0 \
   --port 5000 \
-  --mesh_file demo_data/mustard0/mesh/textured_simple.obj \
+  --mesh_file demo_data/polycam_verify/ob_0000001/model/model.obj \
   --debug_dir results_today/live_tcp \
   > results_today/live_tcp/run.log 2>&1
 ```
@@ -307,8 +342,9 @@ python measure_tcp_latency.py \
 3. 把 `unity_sender/Assets/Scripts/FoundationPose/` 拷进 Unity 工程，接线见 [`unity_sender/README.md`](unity_sender/README.md)。
 4. `FoundationPoseTcpSender.host` 填 **Windows 局域网 IP**，不要填 `127.0.0.1`（手机连不到 WSL 的 localhost）。
 5. 建议 Inspector：`rgbCodec = JPEG`，`targetFps` 先用默认 **5**。
-6. **第一帧必须带 mask**（YOLO bbox 矩形或手标），否则 PC 无法 REGISTER。
-7. Unity **目前不接收** `FPRESULT`，手机上看不到估计 pose；PC 可用 `--debug 1` 看 overlay，或看 `ob_in_cam/*.txt`。
+6. **第一帧必须带罩住杯子的 mask**（YOLO 类别 `cup` 的 bbox/分割，或手标），否则 PC 无法 REGISTER。
+7. PC 默认 `--mesh_file` 已是这只杯子的 OBJ：`demo_data/polycam_verify/ob_0000001/model/model.obj`。mask 必须罩住同一只杯子。
+8. Unity **目前不接收** `FPRESULT`，手机上看不到估计 pose；PC 可用 `--debug 1` 看 overlay，或看 `ob_in_cam/*.txt`。
 
 协议检查（不跑估计器）：
 
@@ -365,7 +401,7 @@ Pose 文件是 4×4 文本，可用 `numpy.loadtxt`。
 确认用的是 `foundationpose:5070ti`，并且 `docker run --gpus all`。原版 `wenbowen123/foundationpose` 不支持 5070 Ti。
 
 **第一帧报 `first registration frame requires a mask`**  
-recorded：`demo_data/mustard0/masks/` 缺第一帧。网络：Unity 第一包没带 mask。
+杯子 live：Unity 第一包必须带罩住杯子的 mask。recorded 回归：`demo_data/mustard0/masks/` 缺第一帧。
 
 **弹窗失败 / 卡住**  
 `--debug 0`。不要在无 DISPLAY 的 Docker 里用默认 `--debug 1`。
@@ -394,3 +430,5 @@ Docker Desktop 打开，WSL 集成打开。本 README 里的命令都假设 Dock
 ## 引用
 
 若使用本方法，请引用 FoundationPose CVPR 2024（以及 model-free 时的 BundleSDF CVPR 2023）。BibTeX 见 [`readme.md`](readme.md)。
+
+python run_live.py --provider network --host 0.0.0.0 --port 5000 --debug 0 --debug_dir debug_live_cup
