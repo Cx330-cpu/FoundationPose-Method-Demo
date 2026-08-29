@@ -73,6 +73,8 @@ weights/
 .hypothesis/
 .pytest_cache/
 *.pth
+*.pt
+yolov8x-seg.pt
 weights/
 # Translations
 *.mo
@@ -169,3 +171,6 @@ run_used.yml
 # Native extension build outputs
 mycpp/build/
 mycpp/build_*/
+
+# Local experiment dumps (poses, logs, GPU csv)
+results_today/

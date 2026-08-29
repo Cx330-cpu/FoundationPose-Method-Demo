@@ -133,6 +133,9 @@ class NetworkFrameProvider(FrameProvider):
     logging.info(f"waiting for frame sender on {host}:{port}")
     self.client_sock, self.client_addr = self.server_sock.accept()
     logging.info(f"accepted frame sender from {self.client_addr}")
+    self.n_received = 0
+    self.n_dropped = 0
+    self.n_emitted = 0
     if self.latest_only:
       self.receiver_thread = threading.Thread(target=self._receive_loop, daemon=True)
       self.receiver_thread.start()
@@ -144,6 +147,7 @@ class NetworkFrameProvider(FrameProvider):
       return None
 
     header = decoded["header"]
+    self.n_received += 1
     return FramePacket(
       rgb=decoded["rgb"],
       depth=decoded["depth"],
@@ -163,12 +167,17 @@ class NetworkFrameProvider(FrameProvider):
           self.stream_ended = True
           self.new_frame_event.set()
           return
+        if self.latest_packet is not None:
+          self.n_dropped += 1
         self.latest_packet = packet
         self.new_frame_event.set()
 
   def get_frame(self) -> Optional[FramePacket]:
     if not self.latest_only:
-      return self._receive_next_packet()
+      packet = self._receive_next_packet()
+      if packet is not None:
+        self.n_emitted += 1
+      return packet
 
     while True:
       self.new_frame_event.wait(timeout=0.1)
@@ -176,6 +185,7 @@ class NetworkFrameProvider(FrameProvider):
         if self.latest_packet is not None:
           packet = self.latest_packet
           self.latest_packet = None
+          self.n_emitted += 1
           if not self.stream_ended:
             self.new_frame_event.clear()
           return packet
@@ -207,6 +217,11 @@ class NetworkFrameProvider(FrameProvider):
     self.send_json_message("FPRESULT", payload)
 
   def close(self):
+    logging.info(
+      f"network frame stats received={getattr(self, 'n_received', 0)} "
+      f"emitted={getattr(self, 'n_emitted', 0)} dropped={getattr(self, 'n_dropped', 0)} "
+      f"latest_only={self.latest_only}"
+    )
     for sock in [getattr(self, "client_sock", None), getattr(self, "server_sock", None)]:
       if sock is not None:
         sock.close()
@@ -455,7 +470,7 @@ def tracking_lost_reason(packet, pose, previous_pose, to_origin, bbox, args):
   return None
 
 
-def print_pose_report(packet: FramePacket, pose, state, operation, processing_time, fps):
+def print_pose_report(packet: FramePacket, pose, state, operation, processing_time, fps, queue_latency_ms=None):
   timestamp = "None" if packet.timestamp is None else f"{packet.timestamp:.9f}"
   print(f"frame_id: {packet.frame_id}")
   print(f"timestamp_metadata: {timestamp}")
@@ -463,6 +478,8 @@ def print_pose_report(packet: FramePacket, pose, state, operation, processing_ti
   print(f"operation: {operation}")
   print(f"processing_time_sec: {processing_time:.6f}")
   print(f"processing_fps: {fps:.3f}")
+  if queue_latency_ms is not None:
+    print(f"pc_queue_latency_ms: {queue_latency_ms:.3f}")
   print("pose:")
   print(pose.reshape(4, 4))
   print("")
@@ -551,21 +568,23 @@ def run_live(args):
       fps = 1.0 / processing_time if processing_time > 0 else np.inf
       display_pose = smooth_pose(previous_display_pose, pose, args.result_smoothing_alpha)
       previous_display_pose = display_pose.copy()
+      queue_latency_ms = float(max(0.0, wall_start_time - packet.pc_received_time) * 1000.0)
 
       if args.send_results and hasattr(provider, "send_result"):
         try:
           result = make_pose_result(packet, display_pose, to_origin, bbox, state, operation, fps)
           result["raw_ob_in_cam"] = pose.reshape(4, 4).astype(float).tolist()
+          result["processing_time_sec"] = float(processing_time)
           result["pc_received_time"] = float(packet.pc_received_time)
           result["pc_result_time"] = float(time.time())
-          result["pc_queue_latency_ms"] = float(max(0.0, wall_start_time - packet.pc_received_time) * 1000.0)
+          result["pc_queue_latency_ms"] = queue_latency_ms
           result["smoothing_alpha"] = float(args.result_smoothing_alpha)
           provider.send_result(result)
         except Exception as exc:
           logging.info(f"failed to send FPRESULT for frame {packet.frame_id}: {exc}")
 
       np.savetxt(f'{debug_dir}/ob_in_cam/{packet.frame_id}.txt', pose.reshape(4,4))
-      print_pose_report(packet=packet, pose=pose, state=state, operation=operation, processing_time=processing_time, fps=fps)
+      print_pose_report(packet=packet, pose=pose, state=state, operation=operation, processing_time=processing_time, fps=fps, queue_latency_ms=queue_latency_ms)
       previous_pose = pose.copy()
 
       if debug >= 1 or args.save_track_vis:
